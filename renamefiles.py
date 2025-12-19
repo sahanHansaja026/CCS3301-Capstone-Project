@@ -2,8 +2,10 @@ import os
 
 # List of folder paths (add your 5 paths here)
 folder_paths = [
-    r"C:\Users\sahan\Desktop\Projects\vechicals\Van",
-    r"C:\Users\sahan\Desktop\Projects\vechicals\Truck",
+    r"C:\Users\sahan\Downloads\archive\peacock_non-peacock\peacock",
+    r"C:\Users\sahan\Downloads\archive\peacock_non-peacock\not_peacock",
+     r"C:\Users\sahan\Downloads\archive\peacock_non-peacock\testing",
+
 ]
 
 base_name = input("Enter the base name: ")

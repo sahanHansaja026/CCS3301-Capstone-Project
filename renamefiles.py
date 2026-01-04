@@ -2,8 +2,8 @@ import os
 
 # List of folder paths (add your 5 paths here)
 folder_paths = [
-    r"C:\Users\sahan\Desktop\Projects\vechicals\Van",
-    r"C:\Users\sahan\Desktop\Projects\vechicals\Truck",
+    r"C:\Users\DESHANI\Downloads\archive\Gracula ptilogenys",
+    r"C:\Users\DESHANI\Downloads\archive\testing",
 ]
 
 base_name = input("Enter the base name: ")

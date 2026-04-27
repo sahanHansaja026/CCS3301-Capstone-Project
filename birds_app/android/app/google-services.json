@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "378147682569",
+    "project_id": "admin-7595b",
+    "storage_bucket": "admin-7595b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:378147682569:android:c0f77b58aa9c3ec640bbd8",
+        "android_client_info": {
+          "package_name": "com.example.birds_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCz_SnsfhXpszwhwsHLWgkYMSDvTjQUCCI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

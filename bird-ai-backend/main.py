@@ -1,144 +1,292 @@
-from fastapi import FastAPI, File, UploadFile
-import numpy as np
-import tensorflow as tf
-import librosa
-import cv2
-import shutil
+# main.py
 import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+import numpy as np
+import librosa
+import tensorflow as tf
+import cv2
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import load_model
 
-app = FastAPI()
+# =========================
+# FASTAPI INIT
+# =========================
 
-# -----------------------------
-# 1. LOAD & LOCK MODEL
-# -----------------------------
-MODEL_PATH = "bird_classifier.h5"
+app = FastAPI(title="Bird Sound Classification API")
 
-# Load the model structure
-model = tf.keras.models.load_model(MODEL_PATH)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# 🔥 THE ULTIMATE WINDOWS/SEQUENTIAL FIX:
-# We explicitly build the model with the expected input shape.
-# This solves "The layer sequential has never been called" by defining the output tensors.
-model.build((None, 128, 128, 1)) 
+# =========================
+# LOAD MODEL
+# =========================
 
-def prepare_grad_model(model):
-    # Find the last Conv2D layer in your CNN stack
-    last_conv_layer_name = None
-    for layer in reversed(model.layers):
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            last_conv_layer_name = layer.name
-            break
-            
-    if not last_conv_layer_name:
-        raise ValueError("Could not find a Conv2D layer in your model.")
+MODEL_PATH = "bird_classifier.keras"
 
-    # Create the specialized Grad-CAM model
-    # Because we called model.build() above, model.inputs/outputs are now defined
-    grad_model = tf.keras.models.Model(
-        inputs=model.inputs,
-        outputs=[model.get_layer(last_conv_layer_name).output, model.output]
+model = load_model(MODEL_PATH)
+
+# =========================
+# LABELS
+# IMPORTANT:
+# Use SAME ORDER as training
+# =========================
+
+labels = [
+    "crow",
+    "parrot",
+    "sparrow",
+    "owl"
+]
+
+index_to_label = {i: label for i, label in enumerate(labels)}
+
+# =========================
+# AUDIO CLEANING
+# =========================
+
+def clean_audio(audio, sr):
+
+    # Remove silence
+    audio, _ = librosa.effects.trim(audio)
+
+    # Normalize
+    audio = librosa.util.normalize(audio)
+
+    return audio
+
+
+# =========================
+# FEATURE EXTRACTION
+# =========================
+
+def extract_features(audio, sr, max_len=128):
+
+    mel = librosa.feature.melspectrogram(
+        y=audio,
+        sr=sr
     )
-    
-    # Pre-warm the grad model to ensure it's ready in memory
-    dummy_input = np.zeros((1, 128, 128, 1), dtype=np.float32)
-    _ = grad_model(dummy_input)
-    
-    return grad_model, last_conv_layer_name
 
-# Initialize these globally so they only run once at startup
-try:
-    GRAD_MODEL, LAST_CONV_NAME = prepare_grad_model(model)
-    print(f"✅ Model Initialized. Target layer: {LAST_CONV_NAME}")
-except Exception as e:
-    print(f"❌ Initialization failed: {e}")
-
-labels = ["crow", "peacock", "rooster"]
-
-# -----------------------------
-# 2. FEATURE EXTRACTION
-# -----------------------------
-def extract_mel(file_path):
-    # Load audio (22.05kHz matches your training)
-    audio, sr = librosa.load(file_path, sr=22050)
-    
-    # Generate Mel Spectrogram
-    mel = librosa.feature.melspectrogram(y=audio, sr=sr)
     mel_db = librosa.power_to_db(mel, ref=np.max)
-    
-    # Resize to exact shape used in training (128x128)
-    mel_resized = cv2.resize(mel_db, (128, 128))
-    
-    # Min-Max Normalization
-    mel_min, mel_max = np.min(mel_resized), np.max(mel_resized)
-    mel_norm = (mel_resized - mel_min) / (mel_max - mel_min + 1e-8)
-    
-    return mel_norm.reshape(1, 128, 128, 1)
 
-# -----------------------------
-# 3. GRAD-CAM (Explainable AI)
-# -----------------------------
-def get_grad_cam_heatmap(img_array):
+    # Padding / Trimming
+    if mel_db.shape[1] < max_len:
+
+        pad_width = max_len - mel_db.shape[1]
+
+        mel_db = np.pad(
+            mel_db,
+            ((0, 0), (0, pad_width))
+        )
+
+    else:
+        mel_db = mel_db[:, :max_len]
+
+    return mel_db
+
+
+# =========================
+# GRAD-CAM
+# =========================
+
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name):
+
+    img_tensor = tf.convert_to_tensor(
+        img_array,
+        dtype=tf.float32
+    )
+
+    last_conv_layer = model.get_layer(last_conv_layer_name)
+
+    grad_model = tf.keras.models.Model(
+        [model.inputs],
+        [last_conv_layer.output, model.output]
+    )
+
     with tf.GradientTape() as tape:
-        last_conv_layer_output, preds = GRAD_MODEL(img_array)
-        class_idx = tf.argmax(preds[0])
-        loss = preds[:, class_idx]
 
-    # Calculate gradients
-    grads = tape.gradient(loss, last_conv_layer_output)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        conv_outputs, predictions = grad_model(img_tensor)
 
-    # Weight the features
-    last_conv_layer_output = last_conv_layer_output[0]
-    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
+        pred_index = tf.argmax(predictions[0])
 
-    # ReLU and Normalize Heatmap
-    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-8)
+        class_channel = predictions[:, pred_index]
+
+    grads = tape.gradient(class_channel, conv_outputs)
+
+    pooled_grads = tf.reduce_mean(
+        grads,
+        axis=(0, 1, 2)
+    )
+
+    conv_outputs = conv_outputs[0]
+
+    heatmap = tf.reduce_sum(
+        pooled_grads * conv_outputs,
+        axis=-1
+    )
+
+    heatmap = tf.maximum(heatmap, 0)
+
+    heatmap = heatmap / (tf.reduce_max(heatmap) + 1e-8)
+
     return heatmap.numpy()
 
-# -----------------------------
-# 4. API ENDPOINT
-# -----------------------------
+
+# =========================
+# SAVE GRADCAM IMAGE
+# =========================
+
+def save_gradcam_image(mel_image, heatmap, output_path):
+
+    heatmap = cv2.resize(
+        heatmap,
+        (mel_image.shape[1], mel_image.shape[0])
+    )
+
+    plt.figure(figsize=(8, 4))
+
+    plt.imshow(mel_image, cmap="gray")
+
+    plt.imshow(heatmap, cmap="jet", alpha=0.4)
+
+    plt.axis("off")
+
+    plt.title("Grad-CAM Explainable AI")
+
+    plt.savefig(output_path, bbox_inches="tight")
+
+    plt.close()
+
+
+# =========================
+# ROOT ROUTE
+# =========================
+
+@app.get("/")
+def home():
+    return {
+        "message": "Bird Sound Classification API Running"
+    }
+
+
+# =========================
+# PREDICT ROUTE
+# =========================
+
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    # Create temp file
-    temp_name = f"active_{file.filename}"
-    with open(temp_name, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+
+    temp_path = f"temp_{file.filename}"
+
+    # Save uploaded file
+    with open(temp_path, "wb") as f:
+        f.write(await file.read())
 
     try:
-        # Preprocess audio
-        processed_data = extract_mel(temp_name)
 
-        # 1. Standard Prediction
-        raw_preds = model.predict(processed_data)
-        pred_idx = np.argmax(raw_preds[0])
-        confidence = float(raw_preds[0][pred_idx])
+        # =========================
+        # LOAD AUDIO
+        # =========================
 
-        # 2. Generate Explainability Heatmap
-        heatmap = get_grad_cam_heatmap(processed_data)
+        audio, sr = librosa.load(
+            temp_path,
+            sr=22050
+        )
+
+        audio = clean_audio(audio, sr)
+
+        # =========================
+        # FEATURE EXTRACTION
+        # =========================
+
+        features = extract_features(audio, sr)
+
+        input_data = features[np.newaxis, ..., np.newaxis]
+
+        # =========================
+        # PREDICTION
+        # =========================
+
+        prediction = model.predict(input_data)[0]
+
+        predicted_index = np.argmax(prediction)
+
+        predicted_label = index_to_label[predicted_index]
+
+        confidence = float(prediction[predicted_index])
+
+        probabilities = {
+            index_to_label[i]: float(prediction[i])
+            for i in range(len(labels))
+        }
+
+        # =========================
+        # GRAD-CAM
+        # =========================
+
+        last_conv_layer_name = "conv2d_2"
+
+        heatmap = make_gradcam_heatmap(
+            input_data,
+            model,
+            last_conv_layer_name
+        )
+
+        gradcam_path = f"gradcam_{file.filename}.png"
+
+        save_gradcam_image(
+            features,
+            heatmap,
+            gradcam_path
+        )
+
+        # =========================
+        # RESPONSE
+        # =========================
 
         return {
-            "status": "success",
-            "prediction": {
-                "bird": labels[pred_idx],
-                "confidence": round(confidence, 4),
-                "label_index": int(pred_idx)
-            },
-            "interpretation": {
-                "heatmap": heatmap.tolist()
+
+            "predicted_bird": predicted_label,
+
+            "confidence": round(confidence, 4),
+
+            "all_probabilities": probabilities,
+
+            "explainable_ai": {
+                "gradcam_image": gradcam_path,
+                "description":
+                "Red/yellow areas show important sound regions used by AI prediction."
             }
         }
 
     except Exception as e:
-        return {"status": "error", "message": f"Server Logic Error: {str(e)}"}
-    
+
+        return {
+            "error": str(e)
+        }
+
     finally:
-        # Cleanup file after processing
-        if os.path.exists(temp_name):
-            os.remove(temp_name)
+
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+# =========================
+# RUN SERVER
+# =========================
 
 if __name__ == "__main__":
-    import uvicorn
-    # Important for Windows: ensure uvicorn runs correctly
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )
